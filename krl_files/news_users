@@ -1,0 +1,140 @@
+ruleset news_users {
+  meta {
+    use module lab2_keys
+    use module twilio
+        with account_sid = keys:twilio{"account_sid"}
+             auth_token =  keys:twilio{"auth_token"}
+    share __testing, users, referrals
+  }
+
+  global {
+    __testing = { "queries": [ { "name": "__testing" },
+                                { "name": "users"},
+                                { "name": "referrals"},
+                                {"name": "send_referral_message", "args": ["userId", "referral"]}],
+                  "events": [ { "domain": "user", "type": "subscribed",
+                              "attrs": [ "name", "email", "phone" ] },
+                              { "domain": "user", "type": "referral_accepted",
+                              "attrs": [ "id"] },
+                              {"domain": "user", "type": "clear_all"},
+                              {"domain": "user", "type": "friend_referred",
+                                "attrs": ["name", "email", "phone"] }] }
+
+    from = 8015152998
+    url = "http://localhost:4200/news"
+
+    users = function() {
+      ent:users
+    }
+
+    referrals = function() {
+      ent:referrals
+    }
+
+    send_referral_message = defaction(userId, referral) {
+      to = referral{"phone"}
+      name = referral{"name"}
+      message = <<Hello #{name}, your friend subscribes to Daily News and thought you might be interested. Daily News provides the top headlines from varried news sources. Click the following link to subscribe: localhost:4200/accept/#{userId}>>;
+
+      twilio:send_sms(to, from, message)
+    }
+  }
+
+  rule friend_referred {
+    select when user friend_referred
+    pre {
+      name = event:attr("name")
+      email = event:attr("email")
+      phone = event:attr("phone")
+      userId = random:uuid()
+      referral =  {
+        "name": name,
+        "email": email,
+        "phone": phone
+      }
+    }
+    if (phone != null && phone.length() > 0) then send_referral_message(userId, referral)
+    fired {
+      ent:referrals := ent:referrals.defaultsTo({});
+      ent:referrals{[userId]} := referral;
+    }
+  }
+
+  rule referral_accepted {
+    select when user referral_accepted
+    pre {
+      userId = event:attr("id")
+      user = ent:referrals{userId}
+      name = user{"name"}
+      message = <<Congrats, #{name}! You've successfully subscribed to Daily News.>>
+      to = user{"phone"}
+    }
+    twilio:send_sms(to, from, message)
+    always {
+      clear ent:referrals{[userId]};
+      ent:users{[userId]} := user
+    }
+  }
+
+  rule referral_rejected {
+    select when user referral_rejected
+    pre {
+      userId = event:attr("id")
+    }
+    always {
+      clear ent:referrals{[userId]};
+    }
+  }
+
+  rule user_subscribed {
+    select when user subscribed
+    pre {
+      name = event:attr("name")
+      email = event:attr("email")
+      phone = event:attr("phone")
+      userId = random:uuid()
+      user = {
+        "name": name,
+        "email": email,
+        "phone": phone
+      }
+      message = <<Congrats, #{name}! You've successfully subscribed to Daily News.>>
+    }
+    if (phone != null && phone.length() > 0) then twilio:send_sms(phone, from, message)
+    fired {
+      ent:users := ent:users.defaultsTo({});
+      ent:users{[userId]} := user;
+    }
+  }
+
+  rule news_update {
+    select when news update
+    foreach ent:users setting(user, userId)
+      pre {
+        to = user{"phone"}
+        message = <<See the Daily News update at #{url}>>
+      }
+      twilio:send_sms(to, from, message)
+  }
+
+  rule user_unsubscribed {
+    select when user unsubscribed
+    pre {
+      email = event:attr("email")
+      filtered_users = ent:users.filter(function(user, userId) { user{"email"} == email})
+      userId = filtered_users.keys().head()
+    }
+    if userId != null && userId != "" then noop()
+    fired {
+      clear ent:users{[userId]}
+    }
+  }
+
+  rule clear_users {
+    select when user clear_all
+    always {
+      ent:users := {};
+      ent:referrals := {}
+    }
+  }
+}
